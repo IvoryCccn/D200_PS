@@ -316,7 +316,7 @@ def compute_accuracy(model, data_loader, device):
             correct += (predicted == labels).sum().item()
     return 100 * correct / total
 
-criterion = nn.CrossEntropyLoss()
+criterion = nn.CrossEntropyLoss() # Include LogSoftmax and Negative Log Likelihood
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 n_epochs = 5
