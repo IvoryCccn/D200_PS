@@ -141,7 +141,7 @@ epochs = 100
 loss_history_sgd = []
 
 for epoch in range(epochs):
-    y_pred_sgd = model_sgd(X)               # 1. Forward pass
+    y_pred_sgd = model_sgd(X)           # 1. Forward pass
     loss_sgd = criterion(y_pred_sgd, y) # 2. Compute loss
     optimizer_sgd.zero_grad()           # 3. Zero gradients
     loss_sgd.backward()                 # 4. Backward pass

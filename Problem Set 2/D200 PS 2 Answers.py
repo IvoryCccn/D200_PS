@@ -18,6 +18,7 @@ from choice_learn.data import ChoiceDataset
 from choice_learn.models import ConditionalLogit
 
 # (1a)
+print(f"\n(1a):")
 transport_df = load_modecanada(as_frame=True)
 print(f"Dataset shape: {transport_df.shape}")
 print(transport_df.head(8))
@@ -28,7 +29,6 @@ print(case1)
 n_alts = case1.shape[0]
 chosen_alts = case1.loc[case1["choice"] == 1, "alt"].iloc[0]
 
-print(f"\n(1a):")
 print(f"Number of available alternatives in case 1: {n_alts}")
 print(f"Chosen alternative in case 1: {chosen_alts}")
 
