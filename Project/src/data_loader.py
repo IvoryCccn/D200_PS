@@ -1,11 +1,13 @@
 """
+src/data_loader.py
+==================
 All data loading & processing functions for the WarShock-Spillover project.
 Called by notebooks/01_data_collection.ipynb.
 
 Data flow:
     Yahoo Finance (equity + safe-haven)  ─┐
-    Local Excel  (CSI300, FRED)           ├─▶ merged & aligned ─▶ returns ─▶ volatility
-    Local Excel  (war_events)            ─┘                                ─▶ war dummies
+    Local Excel   (CSI300, FRED)          ├─▶ merged & aligned ─▶ returns ─▶ volatility
+    Local Excel   (war_events)           ─┘                                ─▶ war dummies
 """
 
 import os
@@ -27,8 +29,8 @@ EQUITY_TICKERS = {
     "DAX"     : "^GDAXI",   # German DAX         (EUR)
     "Nikkei"  : "^N225",    # Japan Nikkei 225   (JPY)
     "HangSeng": "^HSI",     # HK Hang Seng       (HKD)
+    # CSI300 loaded from local Excel
     "MSCI_EM" : "EEM",      # MSCI EM ETF        (USD)
-    # CSI300 loaded from local excel — see load_csi300()
 }
 
 CONTROL_TICKERS = {
@@ -63,7 +65,8 @@ def load_yahoo_equity(start: str, end: str) -> dict[str, pd.DataFrame]:
     for name, ticker in EQUITY_TICKERS.items():
         try:
             df = yf.download(ticker, start=start, end=end,
-                             auto_adjust=True, progress=False)
+                             auto_adjust=True, progress=False, 
+                             multi_level_index=False)
             if df.empty:
                 print(f"  [WARNING] {name} ({ticker}): no data returned")
                 continue
@@ -80,7 +83,7 @@ def load_yahoo_equity(start: str, end: str) -> dict[str, pd.DataFrame]:
 
 
 def load_csi300(start: str, end: str) -> pd.DataFrame | None:
-    """Load CSI 300 index from local Excel file."""
+    """Load CSI 300 from local Excel (manually collected)."""
     path = os.path.join(DATA_RAW_DIR, "CSI300_data.xlsx")
     try:
         csi = pd.read_excel(path, usecols=["日期", "收盘"], dtype={"日期": str})
@@ -104,15 +107,17 @@ def load_csi300(start: str, end: str) -> pd.DataFrame | None:
 
 
 def load_yahoo_controls(start: str, end: str) -> dict[str, pd.DataFrame]:
-    """Download safe-haven assets prices from Yahoo Finance as control variables."""
+    """Download safe-haven / control variable prices from Yahoo Finance."""
     frames = {}
     for name, ticker in CONTROL_TICKERS.items():
         try:
             df = yf.download(ticker, start=start, end=end,
-                             auto_adjust=True, progress=False)
+                             auto_adjust=True, progress=False, 
+                             multi_level_index=False)
             if df.empty:
                 print(f"  [WARNING] {name}: no data returned")
                 continue
+
             close = df[["Close"]].rename(columns={"Close": name})
             frames[name] = close
             print(f"  [OK] {name:8s} ({ticker:12s}): {len(close)} rows")
@@ -219,7 +224,7 @@ def compute_volatility(returns_df: pd.DataFrame,
                        window: int = 21) -> pd.DataFrame:
     """
     Annualised rolling volatility for equity indices only.
-    window = 21 trading days ≈ 1 calendar month.
+    window=21 trading days ≈ 1 calendar month.
     """
     equity_ret_cols = [c + "_ret" for c in list(EQUITY_TICKERS.keys()) + ["CSI300"]
                        if c + "_ret" in returns_df.columns]
@@ -230,27 +235,63 @@ def compute_volatility(returns_df: pd.DataFrame,
 
 def build_war_dummies(index: pd.DatetimeIndex, end_date: str) -> pd.DataFrame:
     """
-    Build mideast_war and high_intensity dummy columns from war_events.xlsx.
-    """
-    path = os.path.join(DATA_RAW_DIR, "war_events.xlsx")
-    dummy = pd.DataFrame({"mideast_war": 0, "high_intensity": 0}, index=index)
+    Build dummy columns from war_events.xlsx plus hard-coded crisis periods.
 
+    Columns
+    -------
+    mideast_war    : 1 if any Middle East conflict active
+    high_intensity : 1 for high-intensity ME events only
+    gfc_crisis     : 1 for Global Financial Crisis  (2008-09-01 – 2009-06-30)
+    covid_crisis   : 1 for COVID market shock       (2020-02-01 – 2020-09-30)
+    any_crisis     : 1 if gfc OR covid (convenience union flag)
+
+    Design note
+    -----------
+    GFC window: Lehman collapse (Sep 2008) through trough recovery (Jun 2009).
+    COVID window: First global sell-off (Feb 2020) through initial stabilisation (Sep 2020).
+    """
+    # ── Crisis periods ──────────────────────────────────────────────────────────
+    CRISIS_PERIODS = {
+        "gfc_crisis"  : ("2008-09-01", "2009-06-30"),
+        "covid_crisis": ("2020-02-01", "2020-09-30"),
+    }
+
+    path  = os.path.join(DATA_RAW_DIR, "war_events.xlsx")
+    dummy = pd.DataFrame(
+        {"mideast_war": 0, "high_intensity": 0,
+         "gfc_crisis":  0, "covid_crisis":   0, "any_crisis": 0},
+        index=index,
+    )
+
+    # ── War dummies from Excel ──────────────────────────────────────────────────
     try:
         events = pd.read_excel(path, parse_dates=["start_date", "end_date"])
         for _, row in events.iterrows():
-            end = (row["end_date"] if pd.notna(row["end_date"])
-                   else pd.Timestamp(end_date))
+            end  = (row["end_date"] if pd.notna(row["end_date"])
+                    else pd.Timestamp(end_date))
             mask = (index >= row["start_date"]) & (index <= end)
             dummy.loc[mask, "mideast_war"] = 1
             if row["event_name"] in HIGH_INTENSITY_EVENTS:
                 dummy.loc[mask, "high_intensity"] = 1
-
-        print(f"  mideast_war days   : {dummy['mideast_war'].sum()}")
-        print(f"  high_intensity days: {dummy['high_intensity'].sum()}")
     except FileNotFoundError:
-        print(f"  [ERROR] {path} not found")
+        print(f"  [ERROR] {path} not found — war dummies set to 0")
     except Exception as e:
         print(f"  [ERROR] war dummies: {e}")
+
+    # ── Crisis dummies (hard-coded) ─────────────────────────────────────────────
+    for col, (start, end) in CRISIS_PERIODS.items():
+        mask = (index >= start) & (index <= end)
+        dummy.loc[mask, col] = 1
+
+    dummy["any_crisis"] = ((dummy["gfc_crisis"] == 1) |
+                           (dummy["covid_crisis"] == 1)).astype(int)
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    print(f"  mideast_war    days : {dummy['mideast_war'].sum()}")
+    print(f"  high_intensity days : {dummy['high_intensity'].sum()}")
+    print(f"  gfc_crisis     days : {dummy['gfc_crisis'].sum()}")
+    print(f"  covid_crisis   days : {dummy['covid_crisis'].sum()}")
+    print(f"  any_crisis     days : {dummy['any_crisis'].sum()}")
 
     return dummy
 
