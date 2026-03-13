@@ -6,8 +6,18 @@ Called by notebooks/01_data_collection.ipynb.
 
 Data flow:
     Yahoo Finance (equity + safe-haven)  ─┐
-    Local Excel   (CSI300, FRED)          ├─▶ merged & aligned ─▶ returns ─▶ volatility
-    Local Excel   (war_events)           ─┘                                ─▶ war dummies
+    Local Excel   (FRED_data.xlsx)        ├─▶ merged & aligned ─▶ returns ─▶ volatility
+    Local Excel   (war_events.xlsx)      ─┘                                ─▶ war dummies
+
+Equity universe (8 indices, all via Yahoo Finance):
+    SP500     ^GSPC      US
+    DAX       ^GDAXI     Germany
+    CAC40     ^FCHI      France
+    FTSE100   ^FTSE      UK
+    Nikkei    ^N225      Japan
+    KOSPI     ^KS11      South Korea
+    HangSeng  ^HSI       Hong Kong
+    SSE       000001.SS  China (Shanghai)
 """
 
 import os
@@ -23,14 +33,14 @@ os.makedirs(DATA_PROC_DIR, exist_ok=True)
 
 # ── Index / series definitions ─────────────────────────────────────────────────
 EQUITY_TICKERS = {
-    "SP500"   : "^GSPC",    # US S&P 500         (USD)
-    "STOXX600": "^STOXX",   # Europe STOXX 600   (EUR)
-    "FTSE100" : "^FTSE",    # UK FTSE 100        (GBP)
-    "DAX"     : "^GDAXI",   # German DAX         (EUR)
-    "Nikkei"  : "^N225",    # Japan Nikkei 225   (JPY)
-    "HangSeng": "^HSI",     # HK Hang Seng       (HKD)
-    # CSI300 loaded from local Excel
-    "MSCI_EM" : "EEM",      # MSCI EM ETF        (USD)
+    "SP500"   : "^GSPC",      # US S&P 500              (USD)
+    "DAX"     : "^GDAXI",     # German DAX              (EUR)
+    "CAC40"   : "^FCHI",      # French CAC 40           (EUR)
+    "FTSE100" : "^FTSE",      # UK FTSE 100             (GBP)
+    "Nikkei"  : "^N225",      # Japan Nikkei 225        (JPY)
+    "KOSPI"   : "^KS11",      # South Korea KOSPI       (KRW)
+    "HangSeng": "^HSI",       # Hong Kong Hang Seng     (HKD)
+    "SSE"     : "000001.SS",  # China SSE Composite     (CNY)
 }
 
 CONTROL_TICKERS = {
@@ -44,14 +54,14 @@ FRED_COL_MAP = {
     "DCOILBRENTEU" : "Brent",  # Brent crude oil
     "DCOILWTICO"   : "WTI",    # WTI crude oil
     "DGS10"        : "US10Y",  # US 10-Year Treasury yield
-    "BAMLH0A0HYM2" : "HY_OAS", # ICE BofA HY OAS (TED Spread replacement)
+    "BAMLH0A0HYM2" : "HY_OAS", # ICE BofA HY OAS
 }
 
+# Middle East conflicts classified as high-intensity
 HIGH_INTENSITY_EVENTS = [
-    "Israel-Lebanon 2006",
-    "Gaza Cast Lead 2008",
-    "Israel-Hamas 2023",
-    "Israel-Iran 2024",
+    "Lebanon War 2006",
+    "Gaza War 2008",
+    "Israel-Hamas War 2023",
 ]
 
 
@@ -65,7 +75,7 @@ def load_yahoo_equity(start: str, end: str) -> dict[str, pd.DataFrame]:
     for name, ticker in EQUITY_TICKERS.items():
         try:
             df = yf.download(ticker, start=start, end=end,
-                             auto_adjust=True, progress=False, 
+                             auto_adjust=True, progress=False,
                              multi_level_index=False)
             if df.empty:
                 print(f"  [WARNING] {name} ({ticker}): no data returned")
@@ -82,42 +92,17 @@ def load_yahoo_equity(start: str, end: str) -> dict[str, pd.DataFrame]:
     return frames
 
 
-def load_csi300(start: str, end: str) -> pd.DataFrame | None:
-    """Load CSI 300 from local Excel (manually collected)."""
-    path = os.path.join(DATA_RAW_DIR, "CSI300_data.xlsx")
-    try:
-        csi = pd.read_excel(path, usecols=["日期", "收盘"], dtype={"日期": str})
-        csi["Date"]   = pd.to_datetime(csi["日期"], format="%Y%m%d")
-        csi           = (csi.set_index("Date")[["收盘"]]
-                            .rename(columns={"收盘": "CSI300"}))
-        csi["CSI300"] = pd.to_numeric(csi["CSI300"], errors="coerce")
-        csi           = csi.sort_index().loc[start:end]
-        pct           = csi["CSI300"].isna().mean() * 100
-        print(f"  [OK] CSI300     (local Excel ): "
-              f"{len(csi)} rows | "
-              f"{csi.index[0].date()} ~ {csi.index[-1].date()} | "
-              f"missing={pct:.1f}%")
-        return csi
-    except FileNotFoundError:
-        print(f"  [ERROR] CSI300: {path} not found")
-        return None
-    except Exception as e:
-        print(f"  [ERROR] CSI300: {e}")
-        return None
-
-
 def load_yahoo_controls(start: str, end: str) -> dict[str, pd.DataFrame]:
     """Download safe-haven / control variable prices from Yahoo Finance."""
     frames = {}
     for name, ticker in CONTROL_TICKERS.items():
         try:
             df = yf.download(ticker, start=start, end=end,
-                             auto_adjust=True, progress=False, 
+                             auto_adjust=True, progress=False,
                              multi_level_index=False)
             if df.empty:
                 print(f"  [WARNING] {name}: no data returned")
                 continue
-
             close = df[["Close"]].rename(columns={"Close": name})
             frames[name] = close
             print(f"  [OK] {name:8s} ({ticker:12s}): {len(close)} rows")
@@ -139,7 +124,7 @@ def load_fred(start: str, end: str) -> pd.DataFrame:
 
         raw = raw[present].rename(columns=FRED_COL_MAP)
 
-        # Replace 0 with NaN (holiday placeholders in oil/yield series)
+        # Replace 0 with NaN (holiday placeholders in oil / yield series)
         for col in raw.columns:
             n = (raw[col] == 0).sum()
             if n:
@@ -152,7 +137,7 @@ def load_fred(start: str, end: str) -> pd.DataFrame:
         print(f"  [OK] FRED: {len(raw)} rows | "
               f"{raw.index[0].date()} ~ {raw.index[-1].date()}")
         for col in raw.columns:
-            pct = raw[col].isna().mean() * 100
+            pct  = raw[col].isna().mean() * 100
             flag = "⚠️ " if pct > 5 else "  "
             print(f"  {flag}{col:10s}: {pct:.2f}% missing")
         return raw
@@ -171,17 +156,13 @@ def load_fred(start: str, end: str) -> pd.DataFrame:
 
 def merge_and_align(equity_frames: dict,
                     control_frames: dict,
-                    fred_df: pd.DataFrame,
-                    csi300: pd.DataFrame | None) -> pd.DataFrame:
+                    fred_df: pd.DataFrame) -> pd.DataFrame:
     """
     Merge all data sources and align to S&P 500 trading days.
     Forward-fill up to 3 days to handle cross-market holiday gaps.
     """
     all_frames = list(equity_frames.values()) + list(control_frames.values())
-    if csi300 is not None:
-        all_frames.append(csi300)
-
-    yahoo_df = pd.concat(all_frames, axis=1) if all_frames else pd.DataFrame()
+    yahoo_df   = pd.concat(all_frames, axis=1) if all_frames else pd.DataFrame()
 
     combined = (pd.concat([yahoo_df, fred_df], axis=1)
                 if not fred_df.empty else yahoo_df.copy())
@@ -204,8 +185,7 @@ def merge_and_align(equity_frames: dict,
 
 def compute_returns(combined: pd.DataFrame) -> pd.DataFrame:
     """Compute log returns for price series and first differences for rates."""
-    price_cols = ([c for c in EQUITY_TICKERS if c in combined.columns] +
-                  ["CSI300"] +
+    price_cols = (list(EQUITY_TICKERS.keys()) +
                   [c for c in CONTROL_TICKERS if c in combined.columns] +
                   ["Brent", "WTI"])
     price_cols = [c for c in price_cols if c in combined.columns]
@@ -226,7 +206,7 @@ def compute_volatility(returns_df: pd.DataFrame,
     Annualised rolling volatility for equity indices only.
     window=21 trading days ≈ 1 calendar month.
     """
-    equity_ret_cols = [c + "_ret" for c in list(EQUITY_TICKERS.keys()) + ["CSI300"]
+    equity_ret_cols = [c + "_ret" for c in EQUITY_TICKERS
                        if c + "_ret" in returns_df.columns]
     vol = returns_df[equity_ret_cols].rolling(window).std() * np.sqrt(252)
     vol.columns = [c.replace("_ret", "_vol") for c in equity_ret_cols]
@@ -237,20 +217,30 @@ def build_war_dummies(index: pd.DatetimeIndex, end_date: str) -> pd.DataFrame:
     """
     Build dummy columns from war_events.xlsx plus hard-coded crisis periods.
 
-    Columns
-    -------
+    War events covered (Middle East only, from war_events.xlsx)
+    -----------------------------------------------------------
+    Iraq War                  2003-03-20 ~ 2003-05-01
+    Lebanon War 2006          2006-07-12 ~ 2006-08-14
+    Gaza War 2008             2008-12-27 ~ 2009-01-18
+    Gaza War 2014             2014-07-08 ~ 2014-08-26
+    ISIS Iraq escalation      2014-06-10 ~ 2014-12-09
+    US-Iran crisis            2020-01-03 ~ 2020-01-08
+    Israel-Hamas War 2023     2023-10-07 ~ ongoing
+
+    Dummy columns
+    -------------
     mideast_war    : 1 if any Middle East conflict active
-    high_intensity : 1 for high-intensity ME events only
+    high_intensity : 1 for high-intensity events only
+                     (Lebanon War 2006 / Gaza War 2008 / Israel-Hamas War 2023)
     gfc_crisis     : 1 for Global Financial Crisis  (2008-09-01 – 2009-06-30)
     covid_crisis   : 1 for COVID market shock       (2020-02-01 – 2020-09-30)
     any_crisis     : 1 if gfc OR covid (convenience union flag)
 
     Design note
     -----------
-    GFC window: Lehman collapse (Sep 2008) through trough recovery (Jun 2009).
+    GFC window : Lehman collapse (Sep 2008) through trough recovery (Jun 2009).
     COVID window: First global sell-off (Feb 2020) through initial stabilisation (Sep 2020).
     """
-    # ── Crisis periods ──────────────────────────────────────────────────────────
     CRISIS_PERIODS = {
         "gfc_crisis"  : ("2008-09-01", "2009-06-30"),
         "covid_crisis": ("2020-02-01", "2020-09-30"),

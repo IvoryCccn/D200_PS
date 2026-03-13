@@ -1,17 +1,20 @@
 """
 src/spillover.py
-==========
-Spillover Index construction functions for the WarShock-Spillover project.
+================
+Spillover Index construction and visualisation for the WarShock-Spillover project.
 Called by notebooks/03_spillover_index.ipynb.
 
 Key functions:
-    fit_var                 — fit VAR(p) and select lag order via AIC
-    fevd_matrix             — compute H-step FEVD spillover matrix
-    spillover_summary       — total / directional / net spillover from one window
-    rolling_spillover       — rolling-window spillover index time series
-    plot_spillover_ts       — Fig 6: total spillover index + war events
-    plot_spillover_heatmaps — Fig 7: calm vs war spillover matrices
-    plot_net_spillover      — Fig 8: net spillover bar chart (who transmits/receives)
+    fit_var               — fit VAR(p), lag selected via AIC
+    fevd_matrix           — H-step generalised FEVD (Pesaran & Shin 1998)
+    spillover_summary     — total / directional / net spillover from one FEVD
+    static_spillover      — single-window spillover summary (training sub-samples)
+    rolling_spillover     — rolling-window total spillover time series
+    plot_spillover_heatmaps   — Fig 7: calm vs war FEVD matrices
+    plot_net_spillover        — Fig 8: net spillover bar chart
+    plot_spillover_ts         — Fig 9: rolling index with war-event shading
+    plot_war_structural_break — Fig 10: regime means + Welch t-test
+    save_spillover            — persist rolling series to Excel
 """
 
 import os
@@ -21,8 +24,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
+from scipy import stats as scipy_stats
 from statsmodels.tsa.api import VAR
-from statsmodels.api import OLS, add_constant
 
 warnings.filterwarnings("ignore")
 
@@ -44,148 +47,119 @@ plt.rcParams.update({
     "grid.alpha"       : 0.3,
 })
 
-EQUITY_COLS = ["SP500", "STOXX600", "FTSE100", "DAX",
-               "Nikkei", "HangSeng", "CSI300", "MSCI_EM"]
+# ── Constants (updated for new 8-index universe) ───────────────────────────────
+EQUITY_COLS = ["SP500", "DAX", "CAC40", "FTSE100",
+               "Nikkei", "KOSPI", "HangSeng", "SSE"]
 
+# High-intensity events matching war_events.xlsx event_name exactly
 HIGH_INTENSITY = [
-    "Israel-Lebanon 2006",
-    "Gaza Cast Lead 2008",
-    "Israel-Hamas 2023",
-    "Israel-Iran 2024",
+    "Gaza War 2008",
+    "Israel-Hamas War",
 ]
 
+MARKET_COLORS = {
+    "SP500"   : "#1f77b4",
+    "DAX"     : "#ff7f0e",
+    "CAC40"   : "#2ca02c",
+    "FTSE100" : "#d62728",
+    "Nikkei"  : "#9467bd",
+    "KOSPI"   : "#8c564b",
+    "HangSeng": "#e377c2",
+    "SSE"     : "#7f7f7f",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. Core DY Spillover Functions
+# 1. Core DY Functions
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fit_var(vol_window: pd.DataFrame,
-            maxlags: int = 10,
-            exog: pd.DataFrame = None) -> tuple:
+def fit_var(vol_window: pd.DataFrame, maxlags: int = 10) -> tuple:
     """
-    Fit a VAR(p) or VARX(p) model on a volatility window.
-
-    Parameters
-    ----------
-    vol_window : pd.DataFrame         -- shape (T, N), endogenous vars, no NaN
-    maxlags    : int                  -- maximum lag order for AIC selection
-    exog       : pd.DataFrame or None -- exogenous regressors (e.g. crisis dummies).
+    Fit VAR(p) on vol_window, lag order selected by AIC.
 
     Returns
     -------
     result    : VARResults
     lag_order : int
     """
-    if exog is not None:
-        # ── Partial out exog via OLS on each endogenous column ────────────────
-        exog_aligned = exog.reindex(vol_window.index).fillna(0)
-        X = add_constant(exog_aligned)
-        residuals = pd.DataFrame(index=vol_window.index)
-        for col in vol_window.columns:
-            ols_res = OLS(vol_window[col], X).fit()
-            residuals[col] = ols_res.resid
-        data_for_var = residuals
-    else:
-        data_for_var = vol_window
-
-    model     = VAR(data_for_var)
-    lag_order = model.select_order(maxlags=maxlags).aic
-    lag_order = max(1, lag_order)
-    result    = model.fit(lag_order)
-    return result, lag_order
+    model     = VAR(vol_window)
+    lag_order = max(1, model.select_order(maxlags=maxlags).aic)
+    return model.fit(lag_order), lag_order
 
 
 def fevd_matrix(var_result, H: int = 10) -> np.ndarray:
     """
-    Compute the generalised forecast error variance decomposition (GFEVD)
-    matrix following Diebold-Yilmaz (2012).
-
-    Parameters
-    ----------
-    var_result : VARResults
-    H          : int  — forecast horizon (default 10 days)
+    Generalised FEVD (Pesaran & Shin 1998) — order-invariant.
 
     Returns
     -------
-    fevd : np.ndarray, shape (N, N) e.g. fevd[i, j] = % of market i's forecast error variance explained by shocks from market j
+    fevd : np.ndarray (N, N)  row-normalised; fevd[i,j] = % of market i's
+           H-step forecast error variance explained by shocks from market j.
     """
-    n      = var_result.neqs
-    coefs  = var_result.coefs          # shape (p, N, N)
-    sigma  = var_result.sigma_u        # residual covariance (N, N)
+    n, coefs, sigma = var_result.neqs, var_result.coefs, var_result.sigma_u
+    p = len(coefs)
 
-    # Build MA coefficient matrices Psi_h via recursion
-    p    = len(coefs)
-    psi  = [np.eye(n)]                 # Psi_0 = I
+    psi = [np.eye(n)]
     for h in range(1, H + 1):
-        ph = np.zeros((n, n))
-        for j in range(min(h, p)):
-            ph += psi[h - j - 1] @ coefs[j]
+        ph = sum(psi[h - j - 1] @ coefs[j] for j in range(min(h, p)))
         psi.append(ph)
 
-    # Generalised FEVD (Pesaran & Shin, 1998) — order-invariant
     sigma_diag = np.diag(sigma)
-    fevd       = np.zeros((n, n))
-
+    fevd = np.zeros((n, n))
     for i in range(n):
         denom = sum(psi[h][i, :] @ sigma @ psi[h][i, :] for h in range(H + 1))
         for j in range(n):
-            ej      = np.zeros(n); ej[j] = 1.0
-            numer   = sum((psi[h][i, :] @ sigma @ ej) ** 2
-                          for h in range(H + 1)) / sigma_diag[j]
+            ej    = np.zeros(n); ej[j] = 1.0
+            numer = sum((psi[h][i, :] @ sigma @ ej) ** 2
+                        for h in range(H + 1)) / sigma_diag[j]
             fevd[i, j] = numer / denom
 
-    # Row-normalise so each row sums to 1
-    row_sums = fevd.sum(axis=1, keepdims=True)
-    fevd     = fevd / row_sums
+    fevd /= fevd.sum(axis=1, keepdims=True)   # row-normalise
     return fevd
 
 
-def spillover_summary(fevd: np.ndarray,
-                      labels: list[str]) -> dict:
+def spillover_summary(fevd: np.ndarray, labels: list) -> dict:
     """
-    Compute total, directional, and net spillover indices from a FEVD matrix.
+    Compute total, directional, and net spillover from a FEVD matrix.
 
-    Parameters
-    ----------
-    fevd   : np.ndarray (N, N)  — row-normalised FEVD matrix
-    labels : list[str]          — market names
-
-    Returns
-    -------
-    dict with keys:
-        total       : float — Total Spillover Index (%)
-        to          : pd.Series — spillover transmitted TO others
-        from_       : pd.Series — spillover received FROM others
-        net         : pd.Series — net = to - from_ (positive = net transmitter)
-        matrix_df   : pd.DataFrame — full FEVD matrix with row/col labels
+    Returns dict with keys: total, to, from_, net, matrix_df
     """
-    n      = len(labels)
-    off_d  = fevd.copy()
-    np.fill_diagonal(off_d, 0)
+    n     = len(labels)
+    off_d = fevd.copy(); np.fill_diagonal(off_d, 0)
 
-    total  = off_d.sum() / n * 100   # Total Spillover Index
-
-    to_    = pd.Series(off_d.sum(axis=0) / n * 100, index=labels)  # col sums
-    from_  = pd.Series(off_d.sum(axis=1) / n * 100, index=labels)  # row sums
-    net    = to_ - from_
+    total = off_d.sum() / n * 100
+    to_   = pd.Series(off_d.sum(axis=0) / n * 100, index=labels)
+    from_ = pd.Series(off_d.sum(axis=1) / n * 100, index=labels)
+    net   = to_ - from_
 
     df = pd.DataFrame(fevd * 100, index=labels, columns=labels)
     df["TO others"] = to_.values
-    from_row = from_.values.tolist() + [total]
-    df.loc["FROM others"] = from_row
+    df.loc["FROM others"] = from_.values.tolist() + [total]
 
-    return {
-        "total"    : total,
-        "to"       : to_,
-        "from_"    : from_,
-        "net"      : net,
-        "matrix_df": df,
-    }
+    return {"total": total, "to": to_, "from_": from_, "net": net, "matrix_df": df}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. Rolling Spillover Index
+# 2. Static & Rolling Spillover
 # ══════════════════════════════════════════════════════════════════════════════
+
+def static_spillover(vol_df: pd.DataFrame,
+                     label: str = "Full sample",
+                     H: int = 10,
+                     maxlags: int = 5) -> dict:
+    """Single-window DY spillover summary (used for sub-sample comparisons)."""
+    vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
+    labels   = [c.replace("_vol", "") for c in vol_cols]
+    data     = vol_df[vol_cols].dropna()
+
+    result, lag = fit_var(data, maxlags=maxlags)
+    fevd        = fevd_matrix(result, H=H)
+    summary     = spillover_summary(fevd, labels)
+    summary["label"]     = label
+    summary["lag_order"] = lag
+    print(f"  [{label}] Total Spillover = {summary['total']:.2f}%  (VAR, lag={lag})")
+    return summary
+
 
 def rolling_spillover(vol_df: pd.DataFrame,
                       window: int  = 200,
@@ -193,136 +167,83 @@ def rolling_spillover(vol_df: pd.DataFrame,
                       step: int    = 1,
                       maxlags: int = 5) -> pd.DataFrame:
     """
-    Compute rolling Diebold-Yilmaz Total Spillover Index.
-
-    Parameters
-    ----------
-    vol_df  : pd.DataFrame  — daily annualised volatility (T × N)
-    window  : int           — rolling window size in trading days (default 200)
-    H       : int           — FEVD forecast horizon (default 10)
-    step    : int           — step between windows (default 1 = daily)
-    maxlags : int           — max VAR lag order for AIC selection
-
+    Rolling Diebold-Yilmaz Total Spillover Index.
+ 
     Returns
     -------
-    pd.DataFrame with columns:
-        total_spillover : rolling total spillover index (%)
-        lag_order       : VAR lag selected each window
+    pd.DataFrame  columns: [total_spillover, lag_order]
     """
     vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
     labels   = [c.replace("_vol", "") for c in vol_cols]
     data     = vol_df[vol_cols].dropna()
-
-    records = []
-    dates   = data.index
-
+    dates    = data.index
+ 
     print(f"  Rolling spillover: window={window}, H={H}, "
-          f"n_windows≈{len(dates)//step}")
-
+          f"n_windows≈{len(dates) // step}")
+ 
+    records = []
     for i in range(window, len(dates), step):
         win = data.iloc[i - window: i]
-
-        # Skip windows with any NaN column
         if win.isnull().any().any():
             continue
-
         try:
             result, lag = fit_var(win, maxlags=maxlags)
             fevd        = fevd_matrix(result, H=H)
             summary     = spillover_summary(fevd, labels)
-            records.append({
+            rec = {
                 "Date"           : dates[i],
                 "total_spillover": summary["total"],
                 "lag_order"      : lag,
-            })
-        except Exception as e:
-            # Silently skip failed windows
+            }
+            # Net spillover per market (positive = net transmitter)
+            for mkt, val in summary["net"].items():
+                rec[f"net_{mkt}"] = val
+            records.append(rec)
+        except Exception:
             continue
-
+ 
         if len(records) % 200 == 0:
             print(f"    ... {len(records)} windows done "
                   f"(latest: {dates[i].date()})")
-
+ 
     result_df = pd.DataFrame(records).set_index("Date")
     print(f"  Done. {len(result_df)} spillover observations.")
     return result_df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. Static Spillover (Full-Sample & Sub-Sample)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def static_spillover(vol_df: pd.DataFrame,
-                     label: str = "Full sample",
-                     H: int = 10,
-                     maxlags: int = 5,
-                     exog_df: pd.DataFrame = None) -> dict:
-    """
-    Compute a single spillover summary over the entire vol_df period.
-    Used for calm-period vs war-period comparison.
-
-    Parameters
-    ----------
-    vol_df   : pd.DataFrame            -- daily annualised volatility (T x N)
-    label    : str                     -- label for print output
-    H        : int                     -- FEVD forecast horizon
-    maxlags  : int                     -- max VAR lag order
-    exog_df  : pd.DataFrame or None    -- exogenous regressors aligned to vol_df index.
-    """
-    vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
-    labels   = [c.replace("_vol", "") for c in vol_cols]
-    data     = vol_df[vol_cols].dropna()
-
-    exog_aligned = exog_df.reindex(data.index).fillna(0) if exog_df is not None else None
-    result, lag  = fit_var(data, maxlags=maxlags, exog=exog_aligned)
-    method_tag   = "VARX" if exog_df is not None else "VAR"
-
-    fevd     = fevd_matrix(result, H=H)
-    summary  = spillover_summary(fevd, labels)
-    summary["label"]     = label
-    summary["lag_order"] = lag
-    print(f"  [{label}] Total Spillover = {summary['total']:.2f}%  "
-          f"({method_tag}, lag={lag})")
-    return summary
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 4. Visualisation
+# 3. Visualisation
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _shade_wars(ax, events: pd.DataFrame, end_date: str) -> list:
-    patches = []
+    """Helper: shade war event windows onto an axes."""
     for _, row in events.iterrows():
         end   = row["end_date"] if pd.notna(row["end_date"]) else pd.Timestamp(end_date)
         color = "#d62728" if row["event_name"] in HIGH_INTENSITY else "#ff7f0e"
         ax.axvspan(row["start_date"], end, color=color, alpha=0.13, zorder=0)
-    patches = [
+    return [
         mpatches.Patch(color="#d62728", alpha=0.4, label="High-intensity"),
-        mpatches.Patch(color="#ff7f0e", alpha=0.4, label="Other / Russia-Ukraine"),
+        mpatches.Patch(color="#ff7f0e", alpha=0.4, label="Other Middle East conflict"),
     ]
-    return patches
 
 
-def plot_spillover_ts(spillover_df: pd.DataFrame, events: pd.DataFrame, end_date: str = "2025-12-31", save: bool = True) -> None:
-    """
-    Fig 6: Rolling Total Spillover Index time series with war event shading.
-    Core result figure for the paper.
-    """
+def plot_spillover_ts(spillover_df: pd.DataFrame,
+                      events: pd.DataFrame,
+                      end_date: str = "2025-12-31",
+                      save: bool = True) -> None:
+    """Fig 9: Rolling Total Spillover Index with war-event shading."""
     fig, ax = plt.subplots(figsize=(14, 5))
 
     ax.plot(spillover_df.index, spillover_df["total_spillover"],
             color="#1f77b4", linewidth=1.0, alpha=0.9,
             label="Total Spillover Index (%)")
 
-    # Smooth trend line (21-day MA)
     smooth = spillover_df["total_spillover"].rolling(21).mean()
     ax.plot(smooth.index, smooth,
-            color="#d62728", linewidth=1.8, linestyle="--",
-            label="21-day MA")
+            color="#d62728", linewidth=1.8, linestyle="--", label="21-day MA")
 
     war_patches = _shade_wars(ax, events, end_date)
 
-    # Annotate war event starts
     for _, row in events.iterrows():
         if row["start_date"] >= spillover_df.index[0]:
             short = (row["event_name"]
@@ -351,28 +272,26 @@ def plot_spillover_ts(spillover_df: pd.DataFrame, events: pd.DataFrame, end_date
 
     plt.tight_layout()
     if save:
-        path = os.path.join(FIG_DIR, "fig6_spillover_timeseries.png")
+        path = os.path.join(FIG_DIR, "fig9_spillover_timeseries.png")
         plt.savefig(path, bbox_inches="tight")
         print(f"  Saved → {path}")
     plt.show()
 
 
-def plot_spillover_heatmaps(summary_calm: dict, summary_war: dict, save: bool = True) -> None:
-    """
-    Fig 7: Side-by-side spillover matrices for calm vs war periods.
-    Shows directional spillover between all market pairs.
-    """
+def plot_spillover_heatmaps(summary_calm: dict,
+                            summary_war: dict,
+                            save: bool = True) -> None:
+    """Fig 7: Side-by-side FEVD matrices — Pure Calm vs War Only."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     for ax, summary, title in zip(
         axes,
         [summary_calm, summary_war],
-        [f"Calm Periods  (Total={summary_calm['total']:.1f}%)",
-         f"War Periods   (Total={summary_war['total']:.1f}%)"]
+        [f"Pure Calm  (Total={summary_calm['total']:.1f}%)",
+         f"War Only   (Total={summary_war['total']:.1f}%)"]
     ):
         n      = len(summary["to"])
         labels = list(summary["to"].index)
-        # Use core N×N matrix only (exclude summary row/col)
         mat    = summary["matrix_df"].iloc[:n, :n].values.astype(float)
 
         im = ax.imshow(mat, cmap="YlOrRd", vmin=0, vmax=mat.max(), aspect="auto")
@@ -380,7 +299,7 @@ def plot_spillover_heatmaps(summary_calm: dict, summary_war: dict, save: bool = 
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax.set_yticklabels(labels, fontsize=8)
         ax.set_xlabel("Shock FROM", fontsize=9)
-        ax.set_ylabel("Impact ON", fontsize=9)
+        ax.set_ylabel("Impact ON",  fontsize=9)
         ax.set_title(title, fontsize=10, fontweight="bold")
 
         for r in range(n):
@@ -388,7 +307,6 @@ def plot_spillover_heatmaps(summary_calm: dict, summary_war: dict, save: bool = 
                 ax.text(c, r, f"{mat[r,c]:.1f}", ha="center", va="center",
                         fontsize=6.5,
                         color="white" if mat[r, c] > mat.max() * 0.6 else "black")
-
         plt.colorbar(im, ax=ax, shrink=0.85, label="% variance explained")
 
     fig.suptitle("Directional Volatility Spillover Matrices: Calm vs War\n"
@@ -397,51 +315,321 @@ def plot_spillover_heatmaps(summary_calm: dict, summary_war: dict, save: bool = 
     plt.tight_layout()
     if save:
         path = os.path.join(FIG_DIR, "fig7_spillover_heatmaps.png")
-        plt.savefig(path, bbox_inches="tight")
-        print(f"  Saved → {path}")
+        plt.savefig(path, bbox_inches="tight"); print(f"  Saved → {path}")
     plt.show()
 
 
-def plot_net_spillover(summary_calm: dict, summary_war: dict, save: bool = True) -> None:
-    """
-    Fig 8: Net spillover bar chart (positive = net transmitter of risk).
-    Compares calm vs war period net spillover per market.
-    """
-    labels     = list(summary_calm["net"].index)
-    net_calm   = summary_calm["net"].values
-    net_war    = summary_war["net"].values
-
-    x     = np.arange(len(labels))
-    width = 0.35
+def plot_net_spillover(summary_calm: dict,
+                       summary_war: dict,
+                       save: bool = True) -> None:
+    """Fig 8: Net spillover bar chart — Calm vs War (positive = net transmitter)."""
+    labels   = list(summary_calm["net"].index)
+    x, width = np.arange(len(labels)), 0.35
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    bars1 = ax.bar(x - width/2, net_calm, width,
-                   color="#1f77b4", alpha=0.75, label="Calm periods")
-    bars2 = ax.bar(x + width/2, net_war,  width,
-                   color="#d62728", alpha=0.75, label="War periods")
+    ax.bar(x - width/2, summary_calm["net"].values, width,
+           color="#1f77b4", alpha=0.75, label="Calm periods")
+    ax.bar(x + width/2, summary_war["net"].values,  width,
+           color="#d62728", alpha=0.75, label="War periods")
 
     ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
-    ax.set_ylabel("Net Spillover (% — positive = net transmitter)")
-    ax.set_title("Net Volatility Spillover by Market: Calm vs War Periods\n"
+    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("Net Spillover (%) — positive = net transmitter")
+    ax.set_title("Net Volatility Spillover by Market: Calm vs War\n"
                  "(Positive = risk transmitter,  Negative = risk receiver)",
                  fontsize=11, fontweight="bold")
     ax.legend(fontsize=9)
-
     plt.tight_layout()
     if save:
         path = os.path.join(FIG_DIR, "fig8_net_spillover.png")
-        plt.savefig(path, bbox_inches="tight")
-        print(f"  Saved → {path}")
+        plt.savefig(path, bbox_inches="tight"); print(f"  Saved → {path}")
     plt.show()
 
 
+def plot_war_structural_break(spill: pd.DataFrame,
+                              save: bool = True) -> dict:
+    """
+    Fig 10: War-shock structural break analysis.
+ 
+    Plots the rolling spillover index with:
+      - Regime colour bands (Calm / War)
+      - Regime-mean horizontal lines
+      - Key war-event vertical markers
+      - Welch t-test result annotated on chart
+ 
+    Parameters
+    ----------
+    spill : rolling spillover DataFrame (output of rolling_spillover),
+            must contain columns: total_spillover, mideast_war
+            optionally: any_crisis (used to define Pure Calm if present)
+ 
+    Returns
+    -------
+    dict  with keys: mean_calm, mean_war, t_stat, p_val, n_calm, n_war
+    """
+    # ── Regime masks ──────────────────────────────────────────────────────────
+    # War-dominant: rolling window with >30% war days (war_dominant=1)
+    # Pure Calm:    war_dominant=0 AND any_crisis=0
+    # This alignment ensures spillover value and regime label cover the same window.
+    war_col = "war_dominant" if "war_dominant" in spill.columns else "mideast_war"
+    if "any_crisis" in spill.columns:
+        is_calm = (spill[war_col] == 0) & (spill["any_crisis"] == 0)
+    else:
+        is_calm = (spill[war_col] == 0)
+    is_war = (spill[war_col] == 1)
+ 
+    calm_vals = spill.loc[is_calm, "total_spillover"].dropna()
+    war_vals  = spill.loc[is_war,  "total_spillover"].dropna()
+ 
+    mean_calm = calm_vals.mean()
+    mean_war  = war_vals.mean()
+    t_stat, p_val = scipy_stats.ttest_ind(calm_vals, war_vals, equal_var=False)
+    sig = "***" if p_val < 0.001 else ("**" if p_val < 0.01
+          else ("*" if p_val < 0.05 else "n.s."))
+ 
+    print(f"War Structural Break — Welch t-test")
+    print(f"  Calm : {mean_calm:.2f}%  (n={len(calm_vals)})")
+    print(f"  War  : {mean_war:.2f}%  (n={len(war_vals)})")
+    print(f"  Δ = {mean_war - mean_calm:+.2f} pp   "
+          f"t = {t_stat:.3f}   p = {p_val:.4f}  {sig}")
+ 
+    # ── Plot ──────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(15, 6))
+ 
+    # Raw series + 63-day smooth
+    ax.plot(spill.index, spill["total_spillover"],
+            color="#aec7e8", linewidth=0.6, alpha=0.7, zorder=1)
+    smooth = spill["total_spillover"].rolling(63, center=True).mean()
+    ax.plot(smooth.index, smooth,
+            color="#1f77b4", linewidth=1.8, label="63-day MA", zorder=2)
+ 
+    # Regime shading
+    y_max = spill["total_spillover"].max() * 1.05
+    ax.fill_between(spill.index, 0, y_max,
+                    where=is_calm, color="#2ca02c", alpha=0.08,
+                    label="Calm regime", zorder=0)
+    ax.fill_between(spill.index, 0, y_max,
+                    where=is_war,  color="#ff7f0e", alpha=0.10,
+                    label="War regime", zorder=0)
+ 
+    # Regime mean lines — span the full calm/war index range
+    calm_idx = spill.index[is_calm]
+    war_idx  = spill.index[is_war]
+    if len(calm_idx):
+        ax.hlines(mean_calm, calm_idx[0], calm_idx[-1],
+                  colors="#2ca02c", linewidths=1.6, linestyles="--",
+                  label=f"Calm mean: {mean_calm:.1f}%")
+    if len(war_idx):
+        ax.hlines(mean_war, war_idx[0], war_idx[-1],
+                  colors="#d62728", linewidths=1.6, linestyles="--",
+                  label=f"War mean: {mean_war:.1f}%")
+ 
+    # Key event vertical markers (actual events in war_events.xlsx)
+    key_events = [
+        ("2003-03-20", "Iraq War"),
+        ("2008-12-27", "Gaza 2008"),
+        ("2023-10-07", "Israel-Hamas 2023"),
+    ]
+    y_top = spill["total_spillover"].quantile(0.97)
+    for date_str, label_text in key_events:
+        dt = pd.Timestamp(date_str)
+        if dt < spill.index[0] or dt > spill.index[-1]:
+            continue
+        ax.axvline(dt, color="darkred", linewidth=1.0, linestyle=":", alpha=0.8)
+        ax.text(dt, y_top, label_text, fontsize=7, rotation=0,
+                ha="left", va="top", color="darkred",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7))
+ 
+    # Welch t-test annotation box
+    ax.text(0.01, 0.97,
+            f"Welch t-test: Calm vs War\n"
+            f"Calm {mean_calm:.1f}%  →  War {mean_war:.1f}%\n"
+            f"Δ = {mean_war - mean_calm:+.1f} pp   p {sig}",
+            transform=ax.transAxes, fontsize=8.5, va="top",
+            bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow",
+                      ec="grey", alpha=0.9))
+ 
+    ax.set_title(
+        "Fig 10 · DY(2012) Rolling Spillover Index — War-Shock Structural Analysis\n"
+        "(200-day window, H=10 | Regime means + Welch t-test: Calm vs War)",
+        fontsize=11, fontweight="bold")
+    ax.set_ylabel("Total Spillover Index (%)")
+    ax.set_ylim(bottom=0)
+    ax.xaxis.set_major_locator(mdates.YearLocator(2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.legend(fontsize=8, loc="upper right", ncol=2)
+    plt.tight_layout()
+ 
+    if save:
+        path = os.path.join(FIG_DIR, "fig10_war_structural_break.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"  Saved → {path}")
+    plt.show()
+ 
+    return dict(mean_calm=mean_calm, mean_war=mean_war,
+                t_stat=t_stat, p_val=p_val,
+                n_calm=len(calm_vals), n_war=len(war_vals))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. Save helpers
+# 4. Save helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def save_spillover(df: pd.DataFrame, filename: str = "spillover_index.xlsx") -> None:
+def save_spillover(df: pd.DataFrame,
+                   filename: str = "spillover_index.xlsx") -> None:
     path = os.path.join(PROC_DIR, filename)
     df.to_excel(path)
     print(f"  Saved → {path}  {df.shape}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. VIX-conditional war effect analysis
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def plot_vix_conditional_spillover(
+        spill_df: pd.DataFrame,
+        all_vars_df: pd.DataFrame,
+        war_col: str    = "mideast_war",
+        vix_col: str    = "VIX",
+        n_quantiles: int = 3,
+        fig_filename: str = "fig10_vix_conditional_spillover.png",
+        save: bool = True) -> pd.DataFrame:
+    """
+    VIX-conditional war-effect analysis on rolling total spillover.
+ 
+    Splits the sample into VIX quantile buckets (low / mid / high by default),
+    then within each bucket compares war vs non-war spillover means via
+    Welch t-test. If the war premium persists across all VIX regimes, it is
+    not driven by VIX-war collinearity.
+ 
+    Parameters
+    ----------
+    spill_df    : rolling spillover DataFrame with war_col attached
+    all_vars_df : all_variables_aligned.xlsx
+    war_col     : column in spill_df flagging war days  (default 'mideast_war')
+    vix_col     : VIX column in all_vars_df             (default 'VIX')
+    n_quantiles : number of VIX quantile buckets        (default 3: low/mid/high)
+    fig_filename: output figure name
+    save        : save figure to FIG_DIR
+ 
+    Returns
+    -------
+    results_df  : DataFrame with columns
+                  VIX_quantile | VIX_mean | war_mean | nonwar_mean |
+                  war_premium | war_premium_pct | t_stat | p_val |
+                  n_war | n_nonwar | sig
+    """
+    # ── 1. Align VIX to spillover index ───────────────────────────────
+    vix = all_vars_df[[vix_col]].rename(columns={vix_col: "VIX"})
+    df  = spill_df[["total_spillover", war_col]].copy()
+    df  = df.join(vix, how="left")
+    df["VIX"] = df["VIX"].ffill(limit=5)
+    df = df.dropna(subset=["total_spillover", "VIX"])
+ 
+    # ── 2. Assign VIX quantile labels ─────────────────────────────────
+    preset = {3: ["Low VIX", "Mid VIX", "High VIX"],
+              4: ["Q1 (low)", "Q2", "Q3", "Q4 (high)"]}
+    qlabels = preset.get(n_quantiles,
+                         [f"Q{i+1}" for i in range(n_quantiles)])
+    df["vix_q"] = pd.qcut(df["VIX"], q=n_quantiles, labels=qlabels)
+ 
+    # ── 3. Compute war premium per VIX bucket ─────────────────────────
+    rows = []
+    for ql in qlabels:
+        sub     = df[df["vix_q"] == ql]
+        war_v   = sub.loc[sub[war_col] == 1, "total_spillover"].dropna()
+        nowar_v = sub.loc[sub[war_col] == 0, "total_spillover"].dropna()
+        if len(war_v) < 5 or len(nowar_v) < 5:
+            continue
+        t, p = scipy_stats.ttest_ind(war_v, nowar_v, equal_var=False)
+        wm, nm = war_v.mean(), nowar_v.mean()
+        rows.append({
+            "VIX_quantile"    : ql,
+            "VIX_mean"        : round(sub["VIX"].mean(), 1),
+            "war_mean"        : round(wm, 2),
+            "nonwar_mean"     : round(nm, 2),
+            "war_premium"     : round(wm - nm, 2),
+            "war_premium_pct" : round((wm - nm) / nm * 100, 1),
+            "t_stat"          : round(t, 3),
+            "p_val"           : round(p, 4),
+            "n_war"           : len(war_v),
+            "n_nonwar"        : len(nowar_v),
+            "sig"             : ("***" if p < 0.01 else
+                                 "**"  if p < 0.05 else
+                                 "*"   if p < 0.10 else "ns"),
+        })
+    results_df = pd.DataFrame(rows)
+ 
+    # ── 4. Print table ─────────────────────────────────────────────────
+    print("=" * 72)
+    print("VIX-CONDITIONAL WAR EFFECT ON TOTAL SPILLOVER")
+    print("=" * 72)
+    print(f"{'VIX Regime':<12} {'VIX avg':>8} {'War':>7} {'Non-War':>9} "
+          f"{'Premium':>9} {'Prem%':>7} {'t':>7} {'p':>7} {'sig':>4} "
+          f"{'n_war':>6} {'n_nw':>6}")
+    print("-" * 72)
+    for _, r in results_df.iterrows():
+        print(f"{r['VIX_quantile']:<12} {r['VIX_mean']:>8.1f} "
+              f"{r['war_mean']:>7.2f} {r['nonwar_mean']:>9.2f} "
+              f"{r['war_premium']:>9.2f} {r['war_premium_pct']:>6.1f}% "
+              f"{r['t_stat']:>7.3f} {r['p_val']:>7.4f} {r['sig']:>4} "
+              f"{r['n_war']:>6} {r['n_nonwar']:>6}")
+ 
+    # ── 5. Figure ──────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        "Fig 10 · VIX-Conditional War Effect on Total Spillover\n"
+        "(Controls for VIX-war collinearity — war premium within each VIX regime)",
+        fontsize=12, fontweight="bold")
+ 
+    qlabels_avail = results_df["VIX_quantile"].tolist()
+    x = np.arange(len(qlabels_avail))
+    w = 0.35
+ 
+    # Left: war vs non-war means by VIX quantile
+    ax = axes[0]
+    b1 = ax.bar(x - w/2, results_df["war_mean"],    w,
+                label="War",     color="#d7191c", alpha=0.85)
+    b2 = ax.bar(x + w/2, results_df["nonwar_mean"], w,
+                label="Non-War", color="#4575b4", alpha=0.85)
+    ax.bar_label(b1, fmt="%.1f", fontsize=8, padding=2)
+    ax.bar_label(b2, fmt="%.1f", fontsize=8, padding=2)
+    for i, (_, r) in enumerate(results_df.iterrows()):
+        if r["sig"] != "ns":
+            ymax = max(r["war_mean"], r["nonwar_mean"])
+            ax.text(i, ymax + 0.8, r["sig"],
+                    ha="center", va="bottom", fontsize=10)
+    ax.set_xticks(x); ax.set_xticklabels(qlabels_avail)
+    ax.set_xlabel("VIX Regime")
+    ax.set_ylabel("Total Spillover (%)")
+    ax.set_title("Mean Spillover: War vs Non-War\nby VIX Quantile",
+                 fontweight="bold")
+    ax.legend(fontsize=9)
+ 
+    # Right: war premium (pp) by VIX quantile
+    ax = axes[1]
+    bar_colors = ["#d7191c" if v > 0 else "#4575b4"
+                  for v in results_df["war_premium"]]
+    bars = ax.bar(x, results_df["war_premium"],
+                  color=bar_colors, alpha=0.85, width=0.5)
+    ax.bar_label(bars, fmt="%.2f pp", fontsize=8, padding=3)
+    ax.axhline(0, color="gray", lw=1.0, linestyle="--")
+    for i, (_, r) in enumerate(results_df.iterrows()):
+        if r["sig"] != "ns":
+            ypos = r["war_premium"] + (0.3 if r["war_premium"] >= 0 else -0.8)
+            ax.text(i, ypos, r["sig"], ha="center", va="bottom", fontsize=10)
+    ax.set_xticks(x); ax.set_xticklabels(qlabels_avail)
+    ax.set_xlabel("VIX Regime")
+    ax.set_ylabel("War Premium (pp)")
+    ax.set_title("War Spillover Premium (War − Non-War)\nby VIX Quantile",
+                 fontweight="bold")
+ 
+    plt.tight_layout()
+    if save:
+        os.makedirs(FIG_DIR, exist_ok=True)
+        path = os.path.join(FIG_DIR, fig_filename)
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"  Saved → {path}")
+    plt.show()
+ 
+    return results_df

@@ -11,8 +11,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # ── Constants ─────────────────────────────────────────────────────────
 EQUITY_COLS = [
-    "SP500_vol", "STOXX600_vol", "FTSE100_vol", "DAX_vol",
-    "Nikkei_vol", "HangSeng_vol", "MSCI_EM_vol", "CSI300_vol",
+    "SP500_vol", "DAX_vol", "CAC40_vol", "FTSE100_vol",
+    "Nikkei_vol", "KOSPI_vol", "HangSeng_vol", "SSE_vol",
 ]
 DEFAULT_MAXLAGS = 10
 HORIZONS = [1, 5, 10, 22]

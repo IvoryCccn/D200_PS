@@ -6,13 +6,13 @@ Called by notebooks/02_eda.ipynb.
 
 Functions:
     plot_volatility_timeseries   — Fig 1: rolling vol + war shading
-    plot_return_distributions    — Fig 2: return histograms vs normal
+    plot_return_distributions    — Fig 2: return histograms vs normal (fat tails)
     plot_correlation_heatmaps    — Fig 3: calm vs war correlation matrices
-    plot_event_windows           — Fig 4: cumulative returns around events
-    plot_macro_war_linkage       — Fig 5: Oil / Gold / VIX vs war events
-    run_adf_tests                — Table: stationarity of vol series
-    war_vs_calm_stats            — Table: descriptive stats by regime
-    plot_crisis_decomposition    - Fig 5a: 
+    plot_event_windows           — Fig 4: cumulative returns around Middle East events
+    plot_macro_war_linkage       — Fig 5: Brent / Gold / VIX vs war events
+    plot_crisis_decomposition    — Fig 6: bar chart of regime-mean volatilities
+    run_adf_tests                — Table 1: stationarity tests on vol series
+    war_vs_calm_stats            — Table 2: four-regime volatility decomposition
 """
 
 import os
@@ -24,25 +24,25 @@ import matplotlib.patches as mpatches
 from scipy import stats
 from statsmodels.tsa.stattools import adfuller
 
-# ── Output path ────────────────────────────────────────────────────────────────
-ROOT_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FIG_DIR     = os.path.join(ROOT_DIR, "outputs", "figures")
-TABLE_DIR   = os.path.join(ROOT_DIR, "outputs", "tables")
+# ── Output paths ───────────────────────────────────────────────────────────────
+ROOT_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIG_DIR   = os.path.join(ROOT_DIR, "outputs", "figures")
+TABLE_DIR = os.path.join(ROOT_DIR, "outputs", "tables")
 os.makedirs(FIG_DIR,   exist_ok=True)
 os.makedirs(TABLE_DIR, exist_ok=True)
 
 # ── Style ──────────────────────────────────────────────────────────────────────
 plt.rcParams.update({
-    "figure.dpi"      : 150,
-    "font.size"       : 10,
-    "axes.spines.top" : False,
+    "figure.dpi"       : 150,
+    "font.size"        : 10,
+    "axes.spines.top"  : False,
     "axes.spines.right": False,
-    "axes.grid"       : True,
-    "grid.alpha"      : 0.3,
+    "axes.grid"        : True,
+    "grid.alpha"       : 0.3,
 })
 
-EQUITY_COLS = ["SP500", "STOXX600", "FTSE100", "DAX",
-               "Nikkei", "HangSeng", "CSI300", "MSCI_EM"]
+EQUITY_COLS = ["SP500", "DAX", "CAC40", "FTSE100",
+               "Nikkei", "KOSPI", "HangSeng", "SSE"]
 
 HIGH_INTENSITY = [
     "Israel-Lebanon 2006",
@@ -63,21 +63,17 @@ MARKET_COLORS = {
 }
 
 
-# ── Helper: shade war periods on an axis ──────────────────────────────────────
+# ── Helper ─────────────────────────────────────────────────────────────────────
 def _shade_wars(ax, events: pd.DataFrame, end_date: str) -> list:
-    """Add war period shading to an existing axis. Returns legend patches."""
-    patches = []
+    """Shade war event windows on an axis. Returns legend patches."""
     for _, row in events.iterrows():
         end   = row["end_date"] if pd.notna(row["end_date"]) else pd.Timestamp(end_date)
         color = "#d62728" if row["event_name"] in HIGH_INTENSITY else "#ff7f0e"
-        alpha = 0.13
-        ax.axvspan(row["start_date"], end, color=color, alpha=alpha, zorder=0)
-
-    patches = [
+        ax.axvspan(row["start_date"], end, color=color, alpha=0.13, zorder=0)
+    return [
         mpatches.Patch(color="#d62728", alpha=0.35, label="High-intensity war"),
-        mpatches.Patch(color="#ff7f0e", alpha=0.35, label="Other conflict / Russia-Ukraine"),
+        mpatches.Patch(color="#ff7f0e", alpha=0.35, label="Other Middle East conflict"),
     ]
-    return patches
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -88,8 +84,11 @@ def plot_volatility_timeseries(vol_df: pd.DataFrame,
                                end_date: str = "2025-12-31",
                                save: bool = True) -> None:
     """
-    Line chart of annualised 21-day rolling volatility for all equity indices,
-    with war-period shading.
+    Fig 1: Annualised 21-day rolling volatility for all equity indices,
+    with Middle East war-period shading.
+
+    Research link: establishes that war events coincide with vol spikes,
+    motivating the war-shock regime analysis in nb03/nb08.
     """
     vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
 
@@ -104,15 +103,18 @@ def plot_volatility_timeseries(vol_df: pd.DataFrame,
 
     war_patches = _shade_wars(ax, events, end_date)
 
-    ax.set_title("Annualised 21-Day Rolling Volatility — Global Equity Indices\n"
-                 "with Middle East War Events", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Volatility (annualised)")
+    ax.set_title("Fig 1 · Annualised 21-Day Rolling Volatility — Global Equity Indices\n"
+                 "with Middle East War Events (2000–2025)",
+                 fontsize=12, fontweight="bold")
+    ax.set_ylabel("Volatility (annualised %)")
     ax.xaxis.set_major_locator(mdates.YearLocator(2))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 
-    market_handles = [plt.Line2D([0], [0], color=MARKET_COLORS.get(c.replace("_vol",""), "grey"),
-                                  linewidth=1.5, label=c.replace("_vol",""))
-                      for c in vol_cols]
+    market_handles = [
+        plt.Line2D([0], [0], color=MARKET_COLORS.get(c.replace("_vol", ""), "grey"),
+                   linewidth=1.5, label=c.replace("_vol", ""))
+        for c in vol_cols
+    ]
     ax.legend(handles=market_handles + war_patches,
               fontsize=7, ncol=5, loc="upper right")
 
@@ -125,49 +127,48 @@ def plot_volatility_timeseries(vol_df: pd.DataFrame,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fig 2 · Return Distributions
+# Fig 2 · Return Distributions (Fat Tails)
 # ══════════════════════════════════════════════════════════════════════════════
 def plot_return_distributions(returns_df: pd.DataFrame,
-                               save: bool = True) -> None:
+                              save: bool = True) -> None:
     """
-    Histogram of daily log returns for each equity index,
-    overlaid with a fitted normal distribution curve.
-    Demonstrates fat tails → motivates deep learning over linear VAR.
+    Fig 2: Daily log return histograms overlaid with normal fit.
+
+    Research link: excess kurtosis in all markets invalidates the Gaussian
+    assumption of linear VAR — directly motivates LSTM and GRU.
     """
     ret_cols = [c + "_ret" for c in EQUITY_COLS if c + "_ret" in returns_df.columns]
-    n        = len(ret_cols)
     ncols    = 4
-    nrows    = (n + ncols - 1) // ncols
+    nrows    = (len(ret_cols) + ncols - 1) // ncols
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 3))
     axes = axes.flatten()
 
     for i, col in enumerate(ret_cols):
-        ax  = axes[i]
-        mkt = col.replace("_ret", "")
+        ax   = axes[i]
+        mkt  = col.replace("_ret", "")
         data = returns_df[col].dropna()
 
-        ax.hist(data, bins=80, density=True, color=MARKET_COLORS.get(mkt, "steelblue"),
+        ax.hist(data, bins=80, density=True,
+                color=MARKET_COLORS.get(mkt, "steelblue"),
                 alpha=0.6, edgecolor="none")
 
-        # Fitted normal
         mu, sigma = data.mean(), data.std()
         x = np.linspace(data.min(), data.max(), 300)
         ax.plot(x, stats.norm.pdf(x, mu, sigma),
-                color="black", linewidth=1.5, linestyle="--", label="Normal fit")
+                color="black", linewidth=1.5, linestyle="--")
 
-        # Annotations
         kurt = data.kurt()
-        ax.set_title(f"{mkt}\nKurt={kurt:.2f}", fontsize=9)
+        skew = data.skew()
+        ax.set_title(f"{mkt}\nKurt={kurt:.2f}  Skew={skew:.2f}", fontsize=9)
         ax.set_xlabel("Log Return", fontsize=7)
         ax.tick_params(labelsize=7)
 
-    # Hide unused subplots
     for j in range(i + 1, len(axes)):
         axes[j].set_visible(False)
 
-    fig.suptitle("Daily Log Return Distributions — Fat Tails vs Normal\n"
-                 "(Excess kurtosis motivates non-linear deep learning models)",
+    fig.suptitle("Fig 2 · Daily Log Return Distributions — Fat Tails vs Normal\n"
+                 "(Excess kurtosis > 0 in all markets → linear VAR mis-specified → LSTM/GRU justified)",
                  fontsize=11, fontweight="bold", y=1.01)
     plt.tight_layout()
     if save:
@@ -181,45 +182,41 @@ def plot_return_distributions(returns_df: pd.DataFrame,
 # Fig 3 · Correlation Heatmaps: Calm vs War
 # ══════════════════════════════════════════════════════════════════════════════
 def plot_correlation_heatmaps(returns_df: pd.DataFrame,
-                               war_dummy: pd.DataFrame,
-                               save: bool = True) -> None:
+                              war_dummy: pd.DataFrame,
+                              save: bool = True) -> None:
     """
-    Side-by-side correlation heatmaps of equity returns:
-    left = calm periods, right = mideast war periods.
-    """
-    import matplotlib.colors as mcolors
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    Fig 3: Side-by-side Pearson correlation matrices — calm vs war periods.
 
+    Research link: higher correlations during war periods suggest increased
+    risk contagion / co-movement, motivating cross-market spillover analysis.
+    """
     ret_cols = [c + "_ret" for c in EQUITY_COLS if c + "_ret" in returns_df.columns]
     labels   = [c.replace("_ret", "") for c in ret_cols]
 
-    calm_mask = war_dummy["mideast_war"] == 0
-    war_mask  = war_dummy["mideast_war"] == 1
+    aligned   = returns_df[ret_cols].join(war_dummy[["mideast_war"]], how="inner")
+    calm_mask = aligned["mideast_war"] == 0
+    war_mask  = aligned["mideast_war"] == 1
 
-    corr_calm = returns_df.loc[calm_mask, ret_cols].corr()
-    corr_war  = returns_df.loc[war_mask,  ret_cols].corr()
+    corr_calm = aligned.loc[calm_mask, ret_cols].corr()
+    corr_war  = aligned.loc[war_mask,  ret_cols].corr()
 
-    cmap = plt.cm.RdYlGn
-    vmin, vmax = -1, 1
-
-    # Reserve space for colorbar on the right via gridspec
     fig = plt.figure(figsize=(15, 5.5))
     gs  = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.05], wspace=0.35)
     ax_calm = fig.add_subplot(gs[0])
     ax_war  = fig.add_subplot(gs[1])
-    ax_cb   = fig.add_subplot(gs[2])   # dedicated colorbar axes
+    ax_cb   = fig.add_subplot(gs[2])
 
     for ax, corr, title in zip(
         [ax_calm, ax_war],
         [corr_calm, corr_war],
-        ["Calm Periods", "Middle East War Periods"]
+        [f"Calm Periods (n={calm_mask.sum()})",
+         f"Middle East War Periods (n={war_mask.sum()})"]
     ):
-        im = ax.imshow(corr.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
-        ax.set_xticks(range(len(labels)))
-        ax.set_yticks(range(len(labels)))
+        im = ax.imshow(corr.values, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto")
+        ax.set_xticks(range(len(labels))); ax.set_yticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
         ax.set_yticklabels(labels, fontsize=8)
-        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=10, fontweight="bold")
 
         for r in range(len(labels)):
             for c in range(len(labels)):
@@ -228,11 +225,9 @@ def plot_correlation_heatmaps(returns_df: pd.DataFrame,
                         fontsize=6.5,
                         color="white" if abs(val) > 0.6 else "black")
 
-    # Colorbar in its own dedicated axes — no overlap
     fig.colorbar(im, cax=ax_cb, label="Pearson Correlation")
-
-    fig.suptitle("Equity Return Correlations: Calm vs Middle East War Periods\n"
-                 "(Higher correlations during war → stronger risk contagion)",
+    fig.suptitle("Fig 3 · Equity Return Correlations: Calm vs Middle East War Periods\n"
+                 "(Higher off-diagonal values during war → stronger risk contagion)",
                  fontsize=11, fontweight="bold", y=1.02)
     plt.tight_layout()
     if save:
@@ -243,7 +238,7 @@ def plot_correlation_heatmaps(returns_df: pd.DataFrame,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fig 4 · Event Study Windows
+# Fig 4 · Event Study: Cumulative Returns Around War Starts
 # ══════════════════════════════════════════════════════════════════════════════
 def plot_event_windows(returns_df: pd.DataFrame,
                        events: pd.DataFrame,
@@ -251,44 +246,52 @@ def plot_event_windows(returns_df: pd.DataFrame,
                        post: int = 60,
                        save: bool = True) -> None:
     """
-    Cumulative returns in [-pre, +post] trading days around each war event start.
-    Compares Middle East wars vs Russia-Ukraine as a reference.
+    Fig 4: Cumulative equal-weight global returns in [-pre, +post] trading days
+    around each Middle East war event start.
+
+    Research link: short-term drawdowns at event onset demonstrate that war
+    shocks transmit quickly across markets — the speed and depth vary by event,
+    evidence of non-linear, regime-dependent dynamics.
     """
-    ret_cols  = [c + "_ret" for c in EQUITY_COLS if c + "_ret" in returns_df.columns]
-    avg_ret   = returns_df[ret_cols].mean(axis=1)   # equal-weight global average
+    ret_cols = [c + "_ret" for c in EQUITY_COLS if c + "_ret" in returns_df.columns]
+    avg_ret  = returns_df[ret_cols].mean(axis=1)
 
-    mideast_events   = events[events["region"] == "Middle East"]
-    russia_events    = events[events["event_name"].str.contains("Russia", na=False)]
+    # Only Middle East events — Russia-Ukraine excluded (different research scope)
+    mideast_events = events[events.get("region", pd.Series("Middle East",
+                     index=events.index)) == "Middle East"] \
+                     if "region" in events.columns else events
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    fig, ax = plt.subplots(figsize=(12, 5))
 
-    def _plot_group(ax, group, title, color):
-        for _, row in group.iterrows():
-            start_dt = row["start_date"]
-            if start_dt not in avg_ret.index:
-                start_dt = avg_ret.index[avg_ret.index.searchsorted(start_dt)]
-            idx = avg_ret.index.get_loc(start_dt)
-            window_idx = avg_ret.index[max(0, idx - pre): idx + post + 1]
-            window_ret = avg_ret.loc[window_idx]
-            cum_ret    = (1 + window_ret).cumprod() - 1
-            x = range(-min(pre, idx), len(cum_ret) - min(pre, idx))
-            ax.plot(list(x), cum_ret.values * 100,
-                    linewidth=1.2, alpha=0.75, label=row["event_name"])
+    colors = plt.cm.tab10(np.linspace(0, 1, len(mideast_events)))
+    for (_, row), color in zip(mideast_events.iterrows(), colors):
+        start_dt = row["start_date"]
+        if start_dt not in avg_ret.index:
+            loc = avg_ret.index.searchsorted(start_dt)
+            if loc >= len(avg_ret.index):
+                continue
+            start_dt = avg_ret.index[loc]
 
-        ax.axvline(0, color="black", linewidth=1.2, linestyle="--", label="Event start")
-        ax.axhline(0, color="grey",  linewidth=0.8, linestyle=":")
-        ax.set_title(title, fontsize=10, fontweight="bold")
-        ax.set_xlabel("Trading days relative to event start")
-        ax.set_ylabel("Cumulative return (%)")
-        ax.legend(fontsize=6.5, loc="lower left")
+        idx        = avg_ret.index.get_loc(start_dt)
+        window_idx = avg_ret.index[max(0, idx - pre): idx + post + 1]
+        window_ret = avg_ret.loc[window_idx]
+        cum_ret    = (1 + window_ret).cumprod() - 1
+        x          = range(-min(pre, idx), len(cum_ret) - min(pre, idx))
 
-    _plot_group(axes[0], mideast_events,
-                "Middle East War Events\n(Equal-weight global index)", "#d62728")
-    _plot_group(axes[1], russia_events,
-                "Russia-Ukraine War (Reference)\n(Equal-weight global index)", "#1f77b4")
+        ax.plot(list(x), cum_ret.values * 100,
+                linewidth=1.3, alpha=0.8, color=color,
+                label=row["event_name"])
 
-    fig.suptitle(f"Event Study: Cumulative Returns [{-pre}, +{post}] Trading Days",
-                 fontsize=11, fontweight="bold")
+    ax.axvline(0, color="black", linewidth=1.2, linestyle="--", label="Event start")
+    ax.axhline(0, color="grey",  linewidth=0.8, linestyle=":")
+    ax.set_xlabel(f"Trading days relative to event start")
+    ax.set_ylabel("Cumulative return (%)")
+    ax.set_title(
+        f"Fig 4 · Event Study: Cumulative Returns [{-pre}, +{post}] Days\n"
+        "Middle East War Events — Equal-Weight Global Index",
+        fontsize=11, fontweight="bold"
+    )
+    ax.legend(fontsize=7, loc="lower left", ncol=2)
     plt.tight_layout()
     if save:
         path = os.path.join(FIG_DIR, "fig4_event_windows.png")
@@ -298,49 +301,61 @@ def plot_event_windows(returns_df: pd.DataFrame,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fig 5 · Oil / Gold / VIX Linkage During War Periods
+# Fig 5 · Brent / Gold / VIX Linkage During War Periods
 # ══════════════════════════════════════════════════════════════════════════════
 def plot_macro_war_linkage(combined: pd.DataFrame,
-                            events: pd.DataFrame,
-                            end_date: str = "2025-12-31",
-                            save: bool = True) -> None:
+                           events: pd.DataFrame,
+                           end_date: str = "2025-12-31",
+                           save: bool = True) -> None:
     """
-    Three-panel time series: Brent oil, Gold, VIX — with war shading.
-    Highlights the anomalous gold decline during Israel-Iran 2024.
+    Fig 5: Three-panel time series — Brent crude, Gold, VIX — with war shading.
+
+    Research link: this is the core transmission channel of the original
+    research motivation (Middle East war → energy disruption → financial markets).
+    Brent spike + VIX spike confirms the oil-fear pathway.
     """
     fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
 
     series_cfg = [
-        ("Brent", "Brent Crude Oil ($/barrel)", "#8B4513"),
-        ("Gold",  "Gold Price ($/oz)",           "#DAA520"),
-        ("VIX",   "VIX — Fear Index",            "#4B0082"),
+        ("Brent", "Brent Crude ($/barrel)",  "#8B4513"),
+        ("Gold",  "Gold ($/oz)",              "#DAA520"),
+        ("VIX",   "VIX — Fear Index",         "#4B0082"),
     ]
 
     for ax, (col, ylabel, color) in zip(axes, series_cfg):
         if col not in combined.columns:
-            ax.set_visible(False)
+            ax.text(0.5, 0.5, f"{col} not found", transform=ax.transAxes,
+                    ha="center", va="center", color="red")
             continue
         ax.plot(combined.index, combined[col],
                 color=color, linewidth=0.9, alpha=0.9)
-        war_patches = _shade_wars(ax, events, end_date)
+        _shade_wars(ax, events, end_date)
         ax.set_ylabel(ylabel, fontsize=9)
-
-        # Annotate key events
         for _, row in events.iterrows():
             ax.axvline(row["start_date"], color="grey",
                        linewidth=0.6, linestyle=":", alpha=0.7)
 
-    # Label war events on top panel
+    # Event labels on top panel
     for _, row in events.iterrows():
-        short = row["event_name"].replace("Israel-", "IL-").replace("Gaza ", "")
-        axes[0].text(row["start_date"], axes[0].get_ylim()[1] * 0.92,
+        short = (row["event_name"]
+                 .replace("Israel-", "IL-")
+                 .replace("Gaza ", "")
+                 .replace(" War", ""))
+        axes[0].text(row["start_date"],
+                     axes[0].get_ylim()[1] * 0.92,
                      short, fontsize=5.5, rotation=75,
                      ha="left", va="top", color="darkred", alpha=0.8)
 
+    war_patches = [
+        mpatches.Patch(color="#d62728", alpha=0.35, label="High-intensity war"),
+        mpatches.Patch(color="#ff7f0e", alpha=0.35, label="Other conflict"),
+    ]
     axes[0].legend(handles=war_patches, fontsize=7, loc="upper left")
-    axes[0].set_title("Oil, Gold & VIX During Middle East War Periods\n"
-                       "(Note: anomalous Gold decline during Israel-Iran 2024)",
-                       fontsize=11, fontweight="bold")
+    axes[0].set_title(
+        "Fig 5 · Brent Oil, Gold & VIX During Middle East War Periods\n"
+        "(Core transmission channel: war → energy → financial markets)",
+        fontsize=11, fontweight="bold"
+    )
     axes[-1].xaxis.set_major_locator(mdates.YearLocator(2))
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 
@@ -355,12 +370,12 @@ def plot_macro_war_linkage(combined: pd.DataFrame,
 # ══════════════════════════════════════════════════════════════════════════════
 # Table 1 · ADF Stationarity Tests
 # ══════════════════════════════════════════════════════════════════════════════
-def run_adf_tests(vol_df: pd.DataFrame,
-                  save: bool = True) -> pd.DataFrame:
+def run_adf_tests(vol_df: pd.DataFrame, save: bool = True) -> pd.DataFrame:
     """
-    ADF unit root test on each equity volatility series.
-    Required before VAR modelling.
-    Returns a summary DataFrame.
+    Table 1: Augmented Dickey-Fuller test on each equity volatility series.
+
+    Research link: VAR requires stationarity — if any series has a unit root,
+    it must be first-differenced before modelling.
     """
     vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
     results  = []
@@ -372,104 +387,97 @@ def run_adf_tests(vol_df: pd.DataFrame,
             "Series"       : col.replace("_vol", ""),
             "ADF Statistic": round(adf_stat, 4),
             "p-value"      : round(p_val,    4),
-            "1% Critical"  : round(crit["1%"],  4),
-            "5% Critical"  : round(crit["5%"],  4),
+            "1% Critical"  : round(crit["1%"], 4),
+            "5% Critical"  : round(crit["5%"], 4),
             "Stationary?"  : "✅ Yes" if p_val < 0.05 else "❌ No",
         })
 
     df = pd.DataFrame(results).set_index("Series")
-    print("\n[ADF Test Results — Volatility Series]")
+    print("\n[Table 1 — ADF Stationarity Tests on Volatility Series]")
     print(df.to_string())
 
     if save:
         path = os.path.join(TABLE_DIR, "table_adf_tests.xlsx")
         df.to_excel(path)
         print(f"\n  Saved → {path}")
-
     return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Table 2 · War vs Calm Descriptive Statistics (crisis-controlled)
+# Table 2 · Four-Regime Volatility Decomposition
 # ══════════════════════════════════════════════════════════════════════════════
 def war_vs_calm_stats(vol_df: pd.DataFrame,
                       war_dummy: pd.DataFrame,
                       save: bool = True) -> pd.DataFrame:
     """
-    Compare mean volatility across four regimes:
+    Table 2: Mean volatility across four regimes per market.
 
-        Regime A — Pure calm   : mideast_war=0 AND any_crisis=0
-        Regime B — War only    : mideast_war=1 AND any_crisis=0
-        Regime C — Crisis only : mideast_war=0 AND any_crisis=1
-        Regime D — War+Crisis  : mideast_war=1 AND any_crisis=1
+        A — Pure Calm  : mideast_war=0, any_crisis=0   (true baseline)
+        B — War Only   : mideast_war=1, any_crisis=0   (clean war effect)
+        C — Crisis Only: mideast_war=0, any_crisis=1   (GFC / COVID)
+        D — War+Crisis : mideast_war=1, any_crisis=1   (overlap)
 
-    The key comparison for the paper is B vs A (war effect net of crises).
-    Crises (GFC + COVID) are controlled for so their outsized volatility
-    does not suppress the apparent war effect.
+    Key ratios:
+        B/A — war premium net of crises
+        C/A — crisis premium (expected >> B/A)
+    Welch t-test (B vs A) gives statistical significance of the war effect.
 
-    Requires war_dummy to contain columns: mideast_war, any_crisis.
-    (Produced by data_loader.build_war_dummies() v2+)
+    Research link: B/A ratio feeds directly into the regime-performance
+    comparison in nb08 Table 3.
     """
-    vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
-
-    # ── Check crisis columns exist (backward-compat) ────────────────────────
+    vol_cols   = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
     has_crisis = "any_crisis" in war_dummy.columns
+
     if not has_crisis:
-        print("  [WARN] war_dummy has no 'any_crisis' column")
+        print("  [WARN] war_dummy has no 'any_crisis' column — falling back to two-regime")
 
     aligned = vol_df[vol_cols].join(war_dummy, how="inner")
+    rows    = []
 
-    rows = []
     for col in vol_cols:
         mkt = col.replace("_vol", "")
 
         if has_crisis:
-            # Four-regime decomposition
             pure_calm   = aligned.loc[(aligned["mideast_war"] == 0) &
                                       (aligned["any_crisis"]  == 0), col].dropna()
-            war_only    = aligned.loc[(aligned["miany_crisis"]  == 0), col].dropna()
+            war_only    = aligned.loc[(aligned["mideast_war"] == 1) &
+                                      (aligned["any_crisis"]  == 0), col].dropna()
             crisis_only = aligned.loc[(aligned["mideast_war"] == 0) &
                                       (aligned["any_crisis"]  == 1), col].dropna()
             war_crisis  = aligned.loc[(aligned["mideast_war"] == 1) &
                                       (aligned["any_crisis"]  == 1), col].dropna()
         else:
-            # Fallback: original two-regime split
             pure_calm   = aligned.loc[aligned["mideast_war"] == 0, col].dropna()
             war_only    = aligned.loc[aligned["mideast_war"] == 1, col].dropna()
             crisis_only = pd.Series(dtype=float)
             war_crisis  = pd.Series(dtype=float)
 
-        hi = aligned.loc[aligned.get("high_intensity", pd.Series(0,
-             index=aligned.index)) == 1, col].dropna()
-
-        # t-test: war-only vs pure-calm (the clean comparison)
         t_stat, p_val = (stats.ttest_ind(war_only, pure_calm, equal_var=False)
                          if len(war_only) > 1 and len(pure_calm) > 1
                          else (np.nan, np.nan))
 
+        calm_mean   = pure_calm.mean()
+        crisis_mean = crisis_only.mean() if len(crisis_only) > 0 else np.nan
+        war_mean    = war_only.mean()
+
         rows.append({
-            "Market"               : mkt,
-            "A: Pure Calm Mean"    : round(pure_calm.mean(),   4),
-            "B: War-Only Mean"     : round(war_only.mean(),    4),
-            "C: Crisis-Only Mean"  : round(crisis_only.mean(), 4) if len(crisis_only) > 0 else np.nan,
-            "D: War+Crisis Mean"   : round(war_crisis.mean(),  4) if len(war_crisis)  > 0 else np.nan,
-            "High-Int Mean"        : round(hi.mean(),          4) if len(hi) > 0 else np.nan,
-            "B/A Ratio"            : round(war_only.mean() / pure_calm.mean(), 3)
-                                     if pure_calm.mean() != 0 else np.nan,
-            "C/A Ratio"            : round(crisis_only.mean() / pure_calm.mean(), 3)
-                                     if len(crisis_only) > 0 and pure_calm.mean() != 0 else np.nan,
-            "t-stat (B vs A)"      : round(t_stat, 3) if not np.isnan(t_stat) else np.nan,
-            "p-value"              : round(p_val,  4) if not np.isnan(p_val)  else np.nan,
-            "Significant?"         : ("✅" if (not np.isnan(p_val) and p_val < 0.05) else "❌"),
+            "Market"             : mkt,
+            "A: Pure Calm"       : round(calm_mean, 4),
+            "B: War Only"        : round(war_mean,  4),
+            "C: Crisis Only"     : round(crisis_mean, 4) if not np.isnan(crisis_mean) else np.nan,
+            "D: War+Crisis"      : round(war_crisis.mean(), 4) if len(war_crisis) > 0 else np.nan,
+            "B/A Ratio"          : round(war_mean / calm_mean, 3) if calm_mean > 0 else np.nan,
+            "C/A Ratio"          : round(crisis_mean / calm_mean, 3)
+                                   if (not np.isnan(crisis_mean) and calm_mean > 0) else np.nan,
+            "t-stat (B vs A)"    : round(t_stat, 3) if not np.isnan(t_stat) else np.nan,
+            "p-value"            : round(p_val,  4) if not np.isnan(p_val)  else np.nan,
+            "Significant?"       : "✅" if (not np.isnan(p_val) and p_val < 0.05) else "❌",
         })
 
     df = pd.DataFrame(rows).set_index("Market")
 
-    print("\n[War vs Calm Volatility — Crisis-Controlled Summary]")
-    print("  Regime A = Pure calm")
-    print("  Regime B = War only")
-    print("  Regime C = Crisis only")
-    print("  Regime D = War + Crisis")
+    print("\n[Table 2 — Four-Regime Volatility Decomposition]")
+    print("  A=Pure Calm  B=War Only  C=Crisis Only  D=War+Crisis")
     print()
     print(df.to_string())
 
@@ -477,30 +485,27 @@ def war_vs_calm_stats(vol_df: pd.DataFrame,
         path = os.path.join(TABLE_DIR, "table_war_vs_calm.xlsx")
         df.to_excel(path)
         print(f"\n  Saved → {path}")
-
     return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fig 5b · Crisis Decomposition Plot
+# Fig 5b · Crisis Decomposition Bar Chart
 # ══════════════════════════════════════════════════════════════════════════════
 def plot_crisis_decomposition(vol_df: pd.DataFrame,
                               war_dummy: pd.DataFrame,
                               save: bool = True) -> None:
     """
-    Fig 5b: Bar chart comparing mean volatility across four regimes
-    (Pure Calm / War Only / Crisis Only / War+Crisis) for each market.
+    Fig 5b: Bar chart of mean volatility across four regimes per market.
 
-    Visually shows that the naive 'war period has lower vol' finding in Table 2
-    (original) was driven by GFC/COVID dominating the 'calm' baseline.
-    After crisis control, war-only periods show elevated vol relative to
-    pure-calm — consistent with the war-shock narrative.
+    Research link: visually confirms that C/A >> B/A (crises dominate),
+    while B/A > 1 shows a real but modest war premium — this heterogeneity
+    motivates the regime-performance analysis in nb08.
     """
     vol_cols = [c + "_vol" for c in EQUITY_COLS if c + "_vol" in vol_df.columns]
     labels   = [c.replace("_vol", "") for c in vol_cols]
 
     if "any_crisis" not in war_dummy.columns:
-        print("  [SKIP] plot_crisis_decomposition requires 'any_crisis' column")
+        print("  [SKIP] requires 'any_crisis' column in war_dummy")
         return
 
     aligned = vol_df[vol_cols].join(war_dummy, how="inner")
@@ -513,9 +518,8 @@ def plot_crisis_decomposition(vol_df: pd.DataFrame,
     }
     colors = ["#4878cf", "#d65f5f", "#e8a838", "#6acc65"]
 
-    x     = np.arange(len(labels))
-    width = 0.20
-    fig, ax = plt.subplots(figsize=(13, 5))
+    x, width = np.arange(len(labels)), 0.20
+    fig, ax  = plt.subplots(figsize=(13, 5))
 
     for i, (regime_name, mask) in enumerate(regimes.items()):
         means = [aligned.loc[mask, c].mean() for c in vol_cols]
@@ -523,32 +527,31 @@ def plot_crisis_decomposition(vol_df: pd.DataFrame,
                label=f"{regime_name}  (n={mask.sum()})",
                color=colors[i], alpha=0.82)
 
+    # Annotate B/A and C/A ratios
+    for i, col in enumerate(vol_cols):
+        calm_mean   = aligned.loc[regimes["A: Pure Calm"],   col].mean()
+        war_mean    = aligned.loc[regimes["B: War Only"],    col].mean()
+        crisis_mean = aligned.loc[regimes["C: Crisis Only"], col].mean()
+        if calm_mean > 0:
+            ax.text(x[i] - 0.20, war_mean + 0.003,
+                    f"B/A={war_mean/calm_mean:.2f}x",
+                    ha="center", va="bottom", fontsize=6, color="#d65f5f")
+            ax.text(x[i] + 0.20, crisis_mean + 0.003,
+                    f"C/A={crisis_mean/calm_mean:.1f}x",
+                    ha="center", va="bottom", fontsize=6, color="#e8a838")
+
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
     ax.set_ylabel("Mean Annualised Volatility")
     ax.set_title(
-        "Volatility Regime Decomposition: War vs Crisis Effects\n"
-        "(Regime A = baseline; B = war net of crises; C = GFC/COVID; D = overlap)",
+        "Fig 5b · Volatility Regime Decomposition: War vs Crisis Effects\n"
+        "(B/A = war premium net of crises;  C/A = GFC/COVID premium)",
         fontsize=11, fontweight="bold"
     )
     ax.legend(fontsize=8, loc="upper right")
-
-    # Annotate C/A ratio to show crisis is the dominant driver
-    for i, col in enumerate(vol_cols):
-        calm_mean   = aligned.loc[regimes["A: Pure Calm"],   col].mean()
-        crisis_mean = aligned.loc[regimes["C: Crisis Only"], col].mean()
-        war_mean    = aligned.loc[regimes["B: War Only"],    col].mean()
-        if calm_mean > 0:
-            ax.text(x[i], crisis_mean + 0.005,
-                    f"C/A={crisis_mean/calm_mean:.1f}x",
-                    ha="center", va="bottom", fontsize=6.5, color="#e8a838")
-            ax.text(x[i] - 0.20, war_mean + 0.005,
-                    f"B/A={war_mean/calm_mean:.2f}x",
-                    ha="center", va="bottom", fontsize=6.5, color="#d65f5f")
-
     plt.tight_layout()
     if save:
-        path = os.path.join(FIG_DIR, "fig5a_crisis_decomposition.png")
+        path = os.path.join(FIG_DIR, "fig6_crisis_decomposition.png")
         plt.savefig(path, bbox_inches="tight")
         print(f"  Saved → {path}")
     plt.show()
